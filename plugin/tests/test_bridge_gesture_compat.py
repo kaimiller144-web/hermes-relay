@@ -89,48 +89,52 @@ class GestureCompatibilityTests(AioHTTPTestCase):
         self.bridge.assert_awaited_once()
         self.assertEqual(self.bridge.await_args.kwargs["path"], "/screen")
 
-    async def test_near_edge_scroll_falls_back_to_screen_center(self):
-        self.bridge.side_effect = [screen(top=950, bottom=2238),
-                                   {"status": 200, "result": {"ok": True}}]
-        response = await self.client.post(
-            "/scroll", json={"nodeId": "w1:34", "direction": "down"}, headers=self.headers
+    async def scroll_with_fresh_handle(self, *, top=900, bottom=2250, scrollable=True):
+        # After #823, real node actions require an opaque ID issued by GET /screen.
+        self.bridge.side_effect = None
+        self.bridge.return_value = screen(top=top, bottom=bottom, scrollable=scrollable)
+        prior = await self.client.get('/screen', headers=self.headers)
+        self.assertEqual(prior.status, 200)
+        handle = (await prior.json())['nodes'][0]['nodeId']
+        self.assertTrue(handle.startswith('n-'))
+        self.bridge.reset_mock()
+        async def bridge_call(**kwargs):
+            if kwargs['path'] == '/screen':
+                return screen(top=top, bottom=bottom, scrollable=scrollable)
+            return {"status": 200, "result": {"ok": True}}
+        self.bridge.side_effect = bridge_call
+        return await self.client.post(
+            '/scroll', json={'nodeId':handle,'direction':'down'}, headers=self.headers
         )
+
+    async def test_near_edge_scroll_falls_back_to_screen_center(self):
+        response = await self.scroll_with_fresh_handle(top=950, bottom=2238)
         data = await response.json()
         self.assertEqual(response.status, 200)
         self.assertEqual(data["scroll_fallback"], "screen_center")
         self.assertTrue(data["gesture_dispatched_only"])
         self.assertIsNone(data["content_movement_verified"])
-        self.assertNotIn("nodeId", self.bridge.await_args_list[1].kwargs["body"])
+        self.assertNotIn("nodeId", self.bridge.await_args_list[-1].kwargs["body"])
 
     async def test_dangerous_edge_scroll_is_refused(self):
-        self.bridge.return_value = screen(top=1775, bottom=2300)
-        response = await self.client.post(
-            "/scroll", json={"nodeId": "w1:34", "direction": "down"}, headers=self.headers
-        )
+        response = await self.scroll_with_fresh_handle(top=1775, bottom=2300)
         data = await response.json()
         self.assertEqual(response.status, 409)
         self.assertFalse(data["action_performed"])
-        self.bridge.assert_awaited_once()
+        self.assertEqual(self.bridge.await_count, 2)
 
     async def test_non_scrollable_node_is_refused(self):
-        self.bridge.return_value = screen(scrollable=False)
-        response = await self.client.post(
-            "/scroll", json={"nodeId": "w1:34", "direction": "down"}, headers=self.headers
-        )
+        response = await self.scroll_with_fresh_handle(scrollable=False)
         self.assertEqual(response.status, 409)
-        self.bridge.assert_awaited_once()
+        self.assertEqual(self.bridge.await_count, 2)
 
     async def test_safe_target_keeps_node_and_does_not_claim_movement(self):
-        self.bridge.side_effect = [screen(top=400, bottom=1750),
-                                   {"status": 200, "result": {"ok": True}}]
-        response = await self.client.post(
-            "/scroll", json={"nodeId": "w1:34", "direction": "down"}, headers=self.headers
-        )
+        response = await self.scroll_with_fresh_handle(top=400, bottom=1750)
         data = await response.json()
         self.assertEqual(response.status, 200)
         self.assertNotIn("scroll_fallback", data)
         self.assertIsNone(data["content_movement_verified"])
-        self.assertEqual(self.bridge.await_args_list[1].kwargs["body"]["nodeId"], "w1:34")
+        self.assertEqual(self.bridge.await_args_list[-1].kwargs["body"]["nodeId"], "w1:34")
 
 
 if __name__ == "__main__":

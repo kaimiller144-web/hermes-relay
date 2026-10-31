@@ -22,6 +22,7 @@ def _node(top: int, bottom: int) -> dict:
 
 
 class _Session:
+    token = "review-session"
     def channel_is_expired(self, _: str) -> bool:
         return False
 
@@ -53,11 +54,11 @@ class _Server:
 
 
 class _Request:
-    method = "POST"
     query = {}
 
-    def __init__(self, body: dict):
+    def __init__(self, body: dict, method: str = "POST"):
         self._body = body
+        self.method = method
 
     async def json(self):
         return self._body
@@ -76,6 +77,11 @@ class ScrollSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.mock_auth.stop()
 
     async def scroll(self, body: dict):
+        # Real application acquires a one-use handle before a node-targeted scroll.
+        if "nodeId" in body:
+            prior = await relay._bridge_dispatch(_Request({},"GET"), "/screen")
+            assert prior.status == 200
+            body = {**body, "nodeId": json.loads(prior.text)["nodes"][0]["nodeId"]}
         response = await relay._bridge_dispatch(_Request(body), "/scroll")
         return response.status, json.loads(response.text)
 
@@ -87,7 +93,7 @@ class ScrollSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["gesture_dispatched_only"])
         self.assertIsNone(result["content_movement_verified"])
         self.assertEqual(
-            [c["path"] for c in self.server.bridge.calls], ["/screen", "/scroll"]
+            [c["path"] for c in self.server.bridge.calls], ["/screen", "/screen", "/screen", "/scroll"]
         )
         self.assertNotIn("nodeId", self.server.bridge.calls[-1]["body"])
 
@@ -97,7 +103,7 @@ class ScrollSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 409)
         self.assertFalse(result["action_performed"])
         self.assertEqual(
-            [c["path"] for c in self.server.bridge.calls], ["/screen"]
+            [c["path"] for c in self.server.bridge.calls], ["/screen", "/screen", "/screen"]
         )
 
     async def test_safe_node_remains_targeted(self):
